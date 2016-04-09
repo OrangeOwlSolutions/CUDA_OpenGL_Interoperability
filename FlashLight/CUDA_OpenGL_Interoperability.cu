@@ -1,72 +1,126 @@
-#ifndef INTERACTIONS_H
-#define INTERACTIONS_H
-#define W 600					// --- Image width
-#define H 600					// --- Image height
-#define DELTA 5 				// --- Pixel increment for arrow keys
-#define TITLE_STRING "flashlight: distance image display app"
-int2 loc = {W/2, H/2};			// --- Initial reference location at {W/2, H/2}, the center of the image.
-bool dragMode = false; // mouse tracking mode
-
-/**********************************/
-/* KEYBOARD INTERACTIONS FUNCTION */
-/**********************************/
-void keyboard(unsigned char key, int x, int y) {
-	if (key == 'a') dragMode = !dragMode; // --- Pressing a toggles between tracking mouse motions and
-										  //     tracking mouse drags (with the mouse button pressed),
-	if (key == 27)  exit(0);			  // --- The ASCII code 27 corresponds to the Esc key. Pressing Esc 
-										  //     closes the graphics window.
-	glutPostRedisplay();				  // --- glutPostRedisplay() is called at the end of each callback
-										  //     function telling to compute a new image for display
-	                                      //     (by calling the display function) based on the interactive
-	                                      //     input
-}
-
-/******************************************/
-/* SPECIAL KEYBOARD INTERACTIONS FUNCTION */
-/******************************************/
-// --- Specifies the response to special keys with defined actions (arrow keys)
-//     Sepressing the arrow keys moves the reference location DELTA pixels in the desired direction.
-void handleSpecialKeypress(int key, int x, int y) {
-	if (key == GLUT_KEY_LEFT)  loc.x -= DELTA;
-	if (key == GLUT_KEY_RIGHT) loc.x += DELTA;
-	if (key == GLUT_KEY_UP)    loc.y -= DELTA;
-	if (key == GLUT_KEY_DOWN)  loc.y += DELTA;
-	glutPostRedisplay();
-}
-
-/************************************/
-/* MOUSE MOVE INTERACTIONS FUNCTION */
-/************************************/
-void mouseMove(int x, int y) {
-	if (dragMode) return;				  // --- When dragMode is true, no action is taken
-	loc.x = x;							  // --- When dragMode is false, the components of the reference
-	                                      //     location are set to be equal to the x and y coordinates of the
-	                                      //     mouse before computing and displaying an updated image
-	                                      //     (via glutPostRedisplay()).
-	loc.y = y;
-	glutPostRedisplay();				  // --- See keyboard function
-}
-
-/************************************/
-/* MOUSE DRAG INTERACTIONS FUNCTION */
-/************************************/
-void mouseDrag(int x, int y) {
-	if (!dragMode) return;				  // --- When dragMode is false, no action is taken
-	loc.x = x;							  // --- When dragMode is true, the reference location is reset to
-										  //     the last location of the mouse while the mouse was clicked
-	loc.y = y;
-	glutPostRedisplay();				  // --- See keyboard function
-}
-
-/******************************/
-/* PRINTINSTRUCTIONS FUNCTION */
-/******************************/
-// --- Prints instructions through the console
-void printInstructions() {
-  printf("flashlight interactions\n");
-  printf("a: toggle mouse tracking mode\n");
-  printf("arrow keys: move ref location\n");
-  printf("esc: close graphics window\n");
-}
-
+#include "CUDA_Processing.cuh"
+#include <stdio.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#define WINDOWS_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <GL\glew.h>
+#include <GL\freeglut.h>
+#elif __linux__
+#include <GL/glew.h>
+#include <GL/freeglut.h>
+#else // --- APPLE
+#include <GLUT/glut.h>
 #endif
+
+#include <cuda_runtime.h>
+#include <cuda_gl_interop.h>
+#include "OpenGL_Keyboard_Mouse.h"
+
+// texture and pixel objects
+GLuint pbo = 0;     // OpenGL pixel buffer object
+GLuint tex = 0;     // OpenGL texture object
+struct cudaGraphicsResource *cuda_pbo_resource;
+
+/*******************/
+/* RENDER FUNCTION */
+/*******************/
+// --- Computes new pixel values launching the CUDA kernel
+void render() {
+	uchar4 *d_out = 0;
+	cudaGraphicsMapResources(1, &cuda_pbo_resource, 0);
+	cudaGraphicsResourceGetMappedPointer((void **)&d_out, NULL, cuda_pbo_resource);
+	kernelLauncher(d_out, W, H, loc);
+	cudaGraphicsUnmapResources(1, &cuda_pbo_resource, 0);
+}
+
+/************************/
+/* DRAWTEXTURE FUNCTION */
+/************************/
+// --- Sets up a 2D OpenGL texture image, creates a single quadrangle graphics primitive with
+//     texture coordinates (0.0f, 0.0f), (0.0f, 1.0f), (1.0f, 1.0f), and (1.0f, 0.0f); that is,
+//     the corners of the unit square, corresponding with the pixel coordinates (0, 0), (0, H), (W, H),
+//     and (W, 0).
+void drawTexture() {
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glEnable(GL_TEXTURE_2D);
+	glBegin(GL_QUADS);
+	glTexCoord2f(0.0f, 0.0f); glVertex2f(0, 0);
+	glTexCoord2f(0.0f, 1.0f); glVertex2f(0, H);
+	glTexCoord2f(1.0f, 1.0f); glVertex2f(W, H);
+	glTexCoord2f(1.0f, 0.0f); glVertex2f(W, 0);
+	glEnd();
+	glDisable(GL_TEXTURE_2D);
+}
+
+/********************/
+/* DISPLAY FUNCTION */
+/********************/
+void display() {
+	render();				// --- Computes new pixel values
+	drawTexture();			// --- Draws the OpenGL texture
+	glutSwapBuffers();	// --- Swap the read/write buffers
+}
+
+/********************************/
+/* GLUT INITIALIZATION FUNCTION */
+/********************************/
+void initGLUT(int *argc, char **argv) {
+	glutInit(argc, argv);
+	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
+	glutInitWindowSize(W, H);
+	glutCreateWindow(TITLE_STRING);
+#ifndef __APPLE__
+	glewInit();
+#endif
+}
+
+/****************************/
+/* INITPIXELBUFFER FUNCTION */
+/****************************/
+// --- Initializes the pixel buffer.
+void initPixelBuffer() {
+	glGenBuffers(1, &pbo);
+	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+	glBufferData(GL_PIXEL_UNPACK_BUFFER, 4 * W*H*sizeof(GLubyte), 0,
+		GL_STREAM_DRAW);
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	// --- \u201cRegisters\u201d the OpenGL buffer with CUDA.
+	cudaGraphicsGLRegisterBuffer(&cuda_pbo_resource, pbo, cudaGraphicsMapFlagsWriteDiscard);
+}
+
+/*****************/
+/* EXIT FUNCTION */
+/*****************/
+// --- Undoes the resource registration and deletes the OpenGL pixel buffer and texture before zero is
+//     returned to indicate completion of main().
+void exitfunc() {
+	if (pbo) {
+		cudaGraphicsUnregisterResource(cuda_pbo_resource);
+		glDeleteBuffers(1, &pbo);
+		glDeleteTextures(1, &tex);
+	}
+}
+
+/********/
+/* MAIN */
+/********/
+int main(int argc, char** argv) {
+	printInstructions();
+	// --- Initializes the GLUT library and sets up the specifications for the graphics window,
+	//     including the display mode (RGBA), the buffering (double), size (W x H), and title.
+	initGLUT(&argc, argv);
+	gluOrtho2D(0, W, H, 0);					// --- Establishes the viewing transform (simple orthographic projection)
+	glutKeyboardFunc(keyboard);				// --- Keyboard interactions are specified by the function keyboard
+	glutSpecialFunc(handleSpecialKeypress);	// --- Special keyboard interactions are specified by the function handleSpecialKeypress
+	glutPassiveMotionFunc(mouseMove);			// --- Mouse move interactions are specified by the function mouseMove
+	glutMotionFunc(mouseDrag);					// --- Mouse drag interactions are specified by the function mouseMove
+	glutDisplayFunc(display);					// --- Says that what is to be shown in the window is determined by the function display
+	initPixelBuffer();							// --- Initializes the pixel buffer
+	glutMainLoop();							// --- Repeatedly checks for input and calls for computation of updated images
+	atexit(exitfunc);							// --- Final clean up
+	return 0;
+}
